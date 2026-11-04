@@ -1,8 +1,8 @@
 import os
 import logging
 import requests
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -14,110 +14,148 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "9179945924:AAGwCM-8BFyu5d3
 user_sessions = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    keyboard = [
+        [InlineKeyboardButton("📧 Generate Temp Email", callback_data="gen_mail")],
+        [InlineKeyboardButton("📥 Check Inbox", callback_data="check_inbox")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    welcome_text = (
         "🛡️ **Welcome to the Temp Mail Bot!**\n\n"
-        "**Available Commands:**\n"
-        "👉 `/gen` - Generate a new temporary email address\n"
-        "👉 `/check` - Check your inbox for incoming emails\n"
-        "👉 `/read <message_id>` - Read the content of a specific email"
+        "No need to type complex commands anymore. "
+        "Just use the buttons below to create and manage your temporary inbox instantly!"
     )
+    
+    if update.message:
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+    elif update.callback_query:
+        await update.callback_query.message.edit_text(welcome_text, reply_markup=reply_markup)
 
-async def generate_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    try:
-        # Mail.tm API ka use karke domain list lete hain aur naya account banate hain
-        domains_res = requests.get("https://api.mail.tm/domains", timeout=10)
-        if domains_res.status_code != 200:
-            await update.message.reply_text("❌ Could not connect to mail server.")
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+    data = query.data
+
+    if data == "gen_mail":
+        try:
+            domains_res = requests.get("https://api.mail.tm/domains", timeout=10)
+            if domains_res.status_code != 200:
+                await query.message.reply_text("❌ Could not connect to mail server.")
+                return
+                
+            domain = domains_res.json()['hydra:member'][0]['domain']
+            
+            import random
+            import string
+            username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+            email = f"{username}@{domain}"
+            password = "Password123!"
+            
+            create_res = requests.post("https://api.mail.tm/accounts", json={"address": email, "password": password}, timeout=10)
+            
+            if create_res.status_code in [200, 201]:
+                token_res = requests.post("https://api.mail.tm/token", json={"address": email, "password": password}, timeout=10)
+                token = token_res.json().get('token')
+                
+                user_sessions[chat_id] = {"email": email, "token": token}
+                
+                keyboard = [
+                    [InlineKeyboardButton("📥 Check Inbox", callback_data="check_inbox")],
+                    [InlineKeyboardButton("🔄 Generate New", callback_data="gen_mail")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await query.message.edit_text(
+                    f"✅ **Your Temporary Email:**\n`{email}`\n\nClick below to check incoming messages or OTPs!",
+                    reply_markup=reply_markup,
+                    parse_mode="Markdown"
+                )
+            else:
+                await query.message.reply_text("❌ Failed to create temporary email account.")
+        except Exception as e:
+            logger.error(f"Error generating email: {e}")
+            await query.message.reply_text("❌ An error occurred while generating email.")
+
+    elif data == "check_inbox":
+        if chat_id not in user_sessions:
+            keyboard = [[InlineKeyboardButton("📧 Generate Temp Email first", callback_data="gen_mail")]]
+            await query.message.edit_text("⚠️ You haven't generated an email yet!", reply_markup=InlineKeyboardMarkup(keyboard))
             return
             
-        domain = domains_res.json()['hydra:member'][0]['domain']
+        session = user_sessions[chat_id]
+        headers = {"Authorization": f"Bearer {session['token']}"}
         
-        # Random email credentials generate karna
-        import random
-        import string
-        username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        email = f"{username}@{domain}"
-        password = "Password123!"
-        
-        # Account create karna
-        create_res = requests.post("https://api.mail.tm/accounts", json={"address": email, "password": password}, timeout=10)
-        
-        if create_res.status_code in [200, 201]:
-            # Token generate karna inbox check karne ke liye
-            token_res = requests.post("https://api.mail.tm/token", json={"address": email, "password": password}, timeout=10)
-            token = token_res.json().get('token')
-            
-            user_sessions[chat_id] = {"email": email, "token": token}
-            await update.message.reply_text(f"✅ **Your Temporary Email:**\n`{email}`\n\nUse `/check` once you receive any mail or OTP!")
-        else:
-            await update.message.reply_text("❌ Failed to create temporary email account.")
-    except Exception as e:
-        logger.error(f"Error generating email: {e}")
-        await update.message.reply_text("❌ An error occurred while generating email.")
-
-async def check_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if chat_id not in user_sessions:
-        await update.message.reply_text("⚠️ Please use `/gen` first to generate an email address!")
-        return
-        
-    session = user_sessions[chat_id]
-    headers = {"Authorization": f"Bearer {session['token']}"}
-    
-    try:
-        res = requests.get("https://api.mail.tm/messages", headers=headers, timeout=10)
-        if res.status_code == 200:
-            messages = res.json().get('hydra:member', [])
-            if not messages:
-                await update.message.reply_text(f"📥 Inbox for `{session['email']}` is currently empty.")
+        try:
+            res = requests.get("https://api.mail.tm/messages", headers=headers, timeout=10)
+            if res.status_code == 200:
+                messages = res.json().get('hydra:member', [])
+                if not messages:
+                    keyboard = [
+                        [InlineKeyboardButton("🔄 Refresh Inbox", callback_data="check_inbox")],
+                        [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")]
+                    ]
+                    await query.message.edit_text(
+                        f"📥 Inbox for `{session['email']}` is currently empty.",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        parse_mode="Markdown"
+                    )
+                else:
+                    keyboard = []
+                    msg_text = f"📥 **Inbox Messages:**\n\n"
+                    for msg in messages:
+                        msg_id = msg.get('id')
+                        sender = msg.get('from', {}).get('address', 'Unknown')
+                        subject = msg.get('subject', 'No Subject')
+                        msg_text += f"👤 **From:** {sender}\n📌 **Subject:** {subject}\n\n"
+                        keyboard.append([InlineKeyboardButton(f"📖 Read: {subject[:20]}...", callback_data=f"read_{msg_id}")])
+                    
+                    keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data="check_inbox"), InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")])
+                    await query.message.edit_text(msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
             else:
-                msg_text = f"📥 **Inbox Messages:**\n\n"
-                for msg in messages:
-                    msg_id = msg.get('id')
-                    sender = msg.get('from', {}).get('address', 'Unknown')
-                    subject = msg.get('subject', 'No Subject')
-                    msg_text += f"🔹 **ID:** `{msg_id}`\n👤 **From:** {sender}\n📌 **Subject:** {subject}\n👉 `/read {msg_id}`\n\n"
-                await update.message.reply_text(msg_text)
-        else:
-            await update.message.reply_text("❌ Failed to fetch inbox messages.")
-    except Exception as e:
-        logger.error(f"Error checking inbox: {e}")
-        await update.message.reply_text("❌ An error occurred while checking inbox.")
+                await query.message.reply_text("❌ Failed to fetch inbox messages.")
+        except Exception as e:
+            logger.error(f"Error checking inbox: {e}")
+            await query.message.reply_text("❌ An error occurred while checking inbox.")
 
-async def read_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if chat_id not in user_sessions or not context.args:
-        await update.message.reply_text("⚠️ Correct usage format: `/read <message_id>`")
-        return
+    elif data.startswith("read_"):
+        msg_id = data.split("_")[1]
+        session = user_sessions[chat_id]
+        headers = {"Authorization": f"Bearer {session['token']}"}
         
-    msg_id = context.args[0]
-    session = user_sessions[chat_id]
-    headers = {"Authorization": f"Bearer {session['token']}"}
-    
-    try:
-        res = requests.get(f"https://api.mail.tm/messages/{msg_id}", headers=headers, timeout=10)
-        if res.status_code == 200:
-            msg_data = res.json()
-            sender = msg_data.get('from', {}).get('address', 'Unknown')
-            subject = msg_data.get('subject', 'No Subject')
-            text_body = msg_data.get('text', 'No text content available.')
-            await update.message.reply_text(f"📩 **From:** {sender}\n📌 **Subject:** {subject}\n\n📝 **Content:**\n{text_body}")
-        else:
-            await update.message.reply_text("❌ Could not read the message.")
-    except Exception as e:
-        logger.error(f"Error reading message: {e}")
-        await update.message.reply_text("❌ An error occurred while reading the message.")
+        try:
+            res = requests.get(f"https://api.mail.tm/messages/{msg_id}", headers=headers, timeout=10)
+            if res.status_code == 200:
+                msg_data = res.json()
+                sender = msg_data.get('from', {}).get('address', 'Unknown')
+                subject = msg_data.get('subject', 'No Subject')
+                text_body = msg_data.get('text', 'No text content available.')
+                
+                keyboard = [
+                    [InlineKeyboardButton("📥 Back to Inbox", callback_data="check_inbox")],
+                    [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")]
+                ]
+                await query.message.edit_text(
+                    f"📩 **From:** {sender}\n📌 **Subject:** {subject}\n\n📝 **Content:**\n{text_body}",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+            else:
+                await query.message.reply_text("❌ Could not read the message.")
+        except Exception as e:
+            logger.error(f"Error reading message: {e}")
+            await query.message.reply_text("❌ An error occurred while reading the message.")
+
+    elif data == "main_menu":
+        await start(update, context)
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("gen", generate_email))
-    app.add_handler(CommandHandler("check", check_inbox))
-    app.add_handler(CommandHandler("read", read_message))
+    app.add_handler(CallbackQueryHandler(button_handler))
     
-    logger.info("🛡️ Temporary Mail Bot is starting polling...")
+    logger.info("🛡️ Temporary Mail Bot with Inline Buttons is running...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
