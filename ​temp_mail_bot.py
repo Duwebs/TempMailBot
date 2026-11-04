@@ -1,27 +1,37 @@
 import os
+import logging
 import requests
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, filters
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 
-# Your Telegram Bot Token is configured here
-TELEGRAM_BOT_TOKEN = "9179945924:AAGwCM-8BFyu5d3D7Mna6xp1tGDfMbnFwqk"
+# Enable logging to catch errors cleanly in Railway logs
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Retrieves the Telegram Bot Token from environment variables or uses your token
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "9179945924:AAGwCM-8BFyu5d3D7Mna6xp1tGDfMbnFwqk")
 
 user_sessions = {}
 API_BASE = "https://www.1secmail.com/api/v1/"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🛡️ **Welcome to the Temp Mail Bot!**\n\n"
-        "**Available Commands:**\n"
-        "👉 `/gen` - Generate a new temporary email address\n"
-        "👉 `/check` - Check your inbox for incoming emails\n"
-        "👉 `/read <message_id>` - Read the content of a specific email"
-    )
+    try:
+        await update.message.reply_text(
+            "🛡️ **Welcome to the Temp Mail Bot!**\n\n"
+            "**Available Commands:**\n"
+            "👉 `/gen` - Generate a new temporary email address\n"
+            "👉 `/check` - Check your inbox for incoming emails\n"
+            "👉 `/read <message_id>` - Read the content of a specific email"
+        )
+    except Exception as e:
+        logger.error(f"Error in start command: {e}")
 
 async def generate_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     try:
-        response = requests.get(f"{API_BASE}?action=genRandomMailbox&count=1")
+        response = requests.get(f"{API_BASE}?action=genRandomMailbox&count=1", timeout=10)
         if response.status_code == 200:
             emails = response.json()
             if emails:
@@ -34,7 +44,8 @@ async def generate_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("❌ Could not connect to the mail API server.")
     except Exception as e:
-        await update.message.reply_text(f"❌ An error occurred: {str(e)}")
+        logger.error(f"Error generating email: {e}")
+        await update.message.reply_text(f"❌ An error occurred while generating email.")
 
 async def check_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -45,7 +56,7 @@ async def check_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = user_sessions[chat_id]
     try:
         url = f"{API_BASE}?action=getMessages&login={session['login']}&domain={session['domain']}"
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         if response.status_code == 200:
             messages = response.json()
             if not messages:
@@ -56,7 +67,8 @@ async def check_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg_text += f"🔹 **ID:** `{msg.get('id')}`\n👤 **From:** {msg.get('from')}\n📌 **Subject:** {msg.get('subject')}\n👉 `/read {msg.get('id')}`\n\n"
                 await update.message.reply_text(msg_text)
     except Exception as e:
-        await update.message.reply_text(f"❌ An error occurred: {str(e)}")
+        logger.error(f"Error checking inbox: {e}")
+        await update.message.reply_text(f"❌ An error occurred while checking inbox.")
 
 async def read_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -68,23 +80,28 @@ async def read_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = user_sessions[chat_id]
     try:
         url = f"{API_BASE}?action=readMessage&login={session['login']}&domain={session['domain']}&id={msg_id}"
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         if response.status_code == 200:
             msg_data = response.json()
             body = msg_data.get('textBody', 'No text content available.')
             await update.message.reply_text(f"📩 **From:** {msg_data.get('from')}\n📌 **Subject:** {msg_data.get('subject')}\n\n📝 **Content:**\n{body}")
     except Exception as e:
-        await update.message.reply_text(f"❌ An error occurred: {str(e)}")
+        logger.error(f"Error reading message: {e}")
+        await update.message.reply_text(f"❌ An error occurred while reading the message.")
 
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("gen", generate_email))
-    app.add_handler(CommandHandler("check", check_inbox))
-    app.add_handler(CommandHandler("read", read_message))
-    
-    print("🛡️ Temporary Mail Bot is up and running...")
-    app.run_polling()
+    try:
+        app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("gen", generate_email))
+        app.add_handler(CommandHandler("check", check_inbox))
+        app.add_handler(CommandHandler("read", read_message))
+        
+        logger.info("🛡️ Temporary Mail Bot is starting polling...")
+        app.run_polling(drop_pending_updates=True)
+    except Exception as e:
+        logger.critical(f"Critical failure in main: {e}")
 
 if __name__ == '__main__':
     main()
