@@ -1,1 +1,1 @@
-worker: python temp_mail_bot.py
+worker: python main.py
